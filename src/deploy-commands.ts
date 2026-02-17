@@ -1,5 +1,7 @@
-import { REST, Routes, SlashCommandBuilder, InteractionContextType, ApplicationIntegrationType } from "discord.js";
+import { REST, Routes } from "discord.js";
 import "dotenv/config";
+import { data as spotifyToYtMusic } from "./commands/spotify-to-ytmusic";
+import { data as ytMusicToSpotify } from "./commands/ytmusic-to-spotify";
 
 const token = process.env.DISCORD_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
@@ -9,27 +11,7 @@ if (!token || !clientId) {
   process.exit(1);
 }
 
-const commands = [
-  new SlashCommandBuilder()
-    .setName("spotify-to-yt-music")
-    .setDescription("Convert a Spotify link to a YouTube Music link")
-    .addStringOption((option) =>
-      option
-        .setName("url")
-        .setDescription("The Spotify URL to convert (track, album, or artist)")
-        .setRequired(true)
-    )
-    .setIntegrationTypes(
-      ApplicationIntegrationType.GuildInstall,
-      ApplicationIntegrationType.UserInstall
-    )
-    .setContexts(
-      InteractionContextType.Guild,
-      InteractionContextType.BotDM,
-      InteractionContextType.PrivateChannel
-    )
-    .toJSON(),
-];
+const commands = [spotifyToYtMusic.toJSON(), ytMusicToSpotify.toJSON()];
 
 const rest = new REST({ version: "10" }).setToken(token);
 
