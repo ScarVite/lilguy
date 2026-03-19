@@ -6,13 +6,18 @@ import {
   ChatInputCommandInteraction,
 } from "discord.js";
 import "dotenv/config";
+import { initSentry } from "./utils/logger";
 import * as spotifyToYtMusic from "./commands/spotify-to-ytmusic";
 import * as ytMusicToSpotify from "./commands/ytmusic-to-spotify";
+
+initSentry();
 
 interface Command {
   data: { name: string };
   execute: (interaction: ChatInputCommandInteraction) => Promise<void>;
 }
+
+const Sentry = require("@sentry/node");
 
 const commands = new Collection<string, Command>();
 

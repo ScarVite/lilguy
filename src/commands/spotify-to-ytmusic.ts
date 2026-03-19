@@ -4,43 +4,26 @@ import {
   ApplicationIntegrationType,
   InteractionContextType,
 } from "discord.js";
+import { MusicConverter } from "../services/converter";
+import { logger } from "../utils/logger";
 
 const SPOTIFY_URL_REGEX =
   /https?:\/\/open\.spotify\.com\/(track|album|artist)\/.+/;
 
-const YTM2SPOTIFY_API = "https://ytm2spotify.com/convert";
+let converter: MusicConverter | null = null;
 
-interface SearchResultItem {
-  url: string;
-  uri: string;
-  art_url: string;
-  description1: string;
-  description2?: string;
-  description3?: string;
-  description4?: string;
-}
+function getConverter(): MusicConverter {
+  if (!converter) {
+    const clientId = process.env.SPOTIFY_CLIENT_ID;
+    const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
 
-interface ConvertResponse {
-  results: SearchResultItem[];
-  manual_search_link: string;
-}
+    if (!clientId || !clientSecret) {
+      throw new Error("Missing Spotify API credentials in .env file");
+    }
 
-async function convertSpotifyToYTMusic(
-  spotifyUrl: string
-): Promise<ConvertResponse> {
-  const params = new URLSearchParams({
-    url: spotifyUrl,
-    to_service: "youtube_music",
-  });
-
-  const response = await fetch(`${YTM2SPOTIFY_API}?${params}`);
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Conversion failed (${response.status}): ${errorText}`);
+    converter = new MusicConverter(clientId, clientSecret);
   }
-
-  return response.json() as Promise<ConvertResponse>;
+  return converter;
 }
 
 export const data = new SlashCommandBuilder()
@@ -79,25 +62,29 @@ export async function execute(
   await interaction.deferReply();
 
   try {
-    const data = await convertSpotifyToYTMusic(url);
+    const musicConverter = getConverter();
+    const result = await musicConverter.convertSpotifyToYouTubeMusic(url);
 
-    if (!data.results || data.results.length === 0) {
+    if (!result) {
       await interaction.editReply({
-        content: `🔍 No YouTube Music match found for that link.\nTry searching manually: ${data.manual_search_link}`,
+        content: `🔍 No YouTube Music match found for that link.`,
       });
       return;
     }
 
-    const top = data.results[0];
-    const parts = [top.description1, top.description3, top.description4]
+    const parts = [result.title, result.description]
       .filter(Boolean)
       .join(" · ");
 
     await interaction.editReply({
-      content: `🎵 **${parts}**\n${top.url}`,
+      content: `🎵 **${parts}**\n${result.url}`,
     });
   } catch (error) {
-    console.error("Conversion error:", error);
+    logger.error("Spotify to YT Music conversion failed", error as Error, {
+      url,
+      userId: interaction.user.id,
+      guildId: interaction.guildId,
+    });
     const message =
       error instanceof Error ? error.message : "Unknown error occurred";
     await interaction.editReply({
