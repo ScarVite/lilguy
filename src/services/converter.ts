@@ -21,6 +21,7 @@ export class MusicConverter {
   private spotifyApi: SpotifyWebApi;
   private ytMusic: YTMusic;
   private initialized = false;
+  private tokenExpiresAt: number = 0;
 
   constructor(spotifyClientId: string, spotifyClientSecret: string) {
     this.spotifyApi = new SpotifyWebApi({
@@ -31,13 +32,29 @@ export class MusicConverter {
   }
 
   async initialize(): Promise<void> {
-    if (this.initialized) return;
+    if (this.initialized) {
+      await this.ensureValidToken();
+      return;
+    }
     
-    const credentials = await this.spotifyApi.clientCredentialsGrant();
-    this.spotifyApi.setAccessToken(credentials.body.access_token);
+    await this.refreshSpotifyToken();
     
     await this.ytMusic.initialize();
     this.initialized = true;
+  }
+
+  private async refreshSpotifyToken(): Promise<void> {
+    logger.debug('Refreshing Spotify access token');
+    const credentials = await this.spotifyApi.clientCredentialsGrant();
+    this.spotifyApi.setAccessToken(credentials.body.access_token);
+    this.tokenExpiresAt = Date.now() + (credentials.body.expires_in * 1000) - 60000;
+    logger.debug('Spotify token refreshed', { expiresIn: credentials.body.expires_in });
+  }
+
+  private async ensureValidToken(): Promise<void> {
+    if (Date.now() >= this.tokenExpiresAt) {
+      await this.refreshSpotifyToken();
+    }
   }
 
   async convertSpotifyToYouTubeMusic(spotifyUrl: string): Promise<ConversionResult | null> {
