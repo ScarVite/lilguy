@@ -1,313 +1,595 @@
-import SpotifyWebApi from 'spotify-web-api-node';
-import YTMusic from 'ytmusic-api';
-import { logger } from '../utils/logger';
+import SpotifyWebApi from "spotify-web-api-node";
+import YTMusic from "ytmusic-api";
+import { logger } from "../utils/logger";
+import { ConversionError } from "./errors";
+import { MatchMetadata, RankedMatch, rankMatches } from "./matching";
+import {
+  ParsedSpotifyUrl,
+  ParsedYouTubeMusicUrl,
+  parseSpotifyUrl,
+  parseYouTubeMusicUrl,
+} from "./url-parser";
+import { TtlCache } from "./ttl-cache";
+
+const TOKEN_REFRESH_BUFFER_MS = 60_000;
+const UPSTREAM_TIMEOUT_MS = 15_000;
+const SEARCH_RESULT_LIMIT = 10;
+const CONVERSION_CACHE_TTL_MS = 6 * 60 * 60 * 1_000;
+const CONVERSION_CACHE_MAX_ENTRIES = 500;
 
 export interface SearchParams {
   name?: string;
   album?: string;
   artist?: string;
-  searchTypeHint?: 'song' | 'album' | 'artist';
+  durationMs?: number;
+  searchTypeHint: "song" | "album" | "artist";
 }
 
-export interface ConversionResult {
+export interface ConversionCandidate {
   url: string;
   title: string;
   description?: string;
   thumbnail?: string;
-  type: 'song' | 'album' | 'artist';
+  type: "song" | "album" | "artist";
+  confidence: number;
+}
+
+export interface ConversionResult extends ConversionCandidate {
+  alternatives?: ConversionCandidate[];
+}
+
+export interface MusicConverterDependencies {
+  spotifyApi?: SpotifyWebApi;
+  ytMusic?: YTMusic;
+  now?: () => number;
+  timeoutMs?: number;
+  cache?: TtlCache<string, ConversionResult | null>;
 }
 
 export class MusicConverter {
-  private spotifyApi: SpotifyWebApi;
-  private ytMusic: YTMusic;
-  private initialized = false;
-  private tokenExpiresAt: number = 0;
+  private readonly spotifyApi: SpotifyWebApi;
+  private readonly ytMusic: YTMusic;
+  private spotifyTokenExpiresAt = 0;
+  private spotifyAuthentication: Promise<void> | null = null;
+  private ytMusicInitialization: Promise<void> | null = null;
+  private ytMusicInitialized = false;
+  private readonly now: () => number;
+  private readonly timeoutMs: number;
+  private readonly conversionCache: TtlCache<
+    string,
+    ConversionResult | null
+  >;
 
-  constructor(spotifyClientId: string, spotifyClientSecret: string) {
-    this.spotifyApi = new SpotifyWebApi({
-      clientId: spotifyClientId,
-      clientSecret: spotifyClientSecret,
-    });
-    this.ytMusic = new YTMusic();
+  constructor(
+    spotifyClientId: string,
+    spotifyClientSecret: string,
+    dependencies: MusicConverterDependencies = {},
+  ) {
+    this.spotifyApi =
+      dependencies.spotifyApi ??
+      new SpotifyWebApi({
+        clientId: spotifyClientId,
+        clientSecret: spotifyClientSecret,
+      });
+    this.ytMusic = dependencies.ytMusic ?? new YTMusic();
+    this.now = dependencies.now ?? Date.now;
+    this.timeoutMs = dependencies.timeoutMs ?? UPSTREAM_TIMEOUT_MS;
+    this.conversionCache =
+      dependencies.cache ??
+      new TtlCache({
+        ttlMs: CONVERSION_CACHE_TTL_MS,
+        maxEntries: CONVERSION_CACHE_MAX_ENTRIES,
+        now: this.now,
+      });
   }
 
   async initialize(): Promise<void> {
-    if (this.initialized) {
-      await this.ensureValidToken();
+    await Promise.all([
+      this.ensureSpotifyToken(),
+      this.ensureYouTubeMusicInitialized(),
+    ]);
+  }
+
+  async convertSpotifyToYouTubeMusic(
+    spotifyUrl: string,
+  ): Promise<ConversionResult | null> {
+    const parsedUrl = parseSpotifyUrl(spotifyUrl);
+    if (!parsedUrl) {
+      throw new ConversionError(
+        "INVALID_URL",
+        "That does not look like a supported Spotify track, album, or artist link.",
+      );
+    }
+
+    logger.debug("Starting Spotify → YouTube Music conversion", {
+      type: parsedUrl.type,
+      id: parsedUrl.id,
+    });
+
+    return this.conversionCache.getOrCreate(
+      `spotify:${parsedUrl.canonicalUrl}`,
+      async () => {
+        await this.initialize();
+        const searchParams = await this.extractSpotifyMetadata(parsedUrl);
+        logger.debug("Extracted Spotify search metadata", searchParams);
+        return this.searchYouTubeMusic(searchParams);
+      },
+    );
+  }
+
+  async convertYouTubeMusicToSpotify(
+    ytMusicUrl: string,
+  ): Promise<ConversionResult | null> {
+    const parsedUrl = parseYouTubeMusicUrl(ytMusicUrl);
+    if (!parsedUrl) {
+      throw new ConversionError(
+        "INVALID_URL",
+        "That does not look like a supported YouTube Music song, album, artist, or playlist link.",
+      );
+    }
+
+    if (parsedUrl.type === "playlist") {
+      throw new ConversionError(
+        "UNSUPPORTED_RESOURCE",
+        "Playlist creation needs a connected Spotify account and is not available yet. Song, album, and artist links work now.",
+      );
+    }
+
+    logger.debug("Starting YouTube Music → Spotify conversion", {
+      type: parsedUrl.type,
+      id: parsedUrl.id,
+    });
+
+    return this.conversionCache.getOrCreate(
+      `youtubeMusic:${parsedUrl.canonicalUrl}`,
+      async () => {
+        await this.initialize();
+        const searchParams = await this.extractYouTubeMusicMetadata(parsedUrl);
+        logger.debug("Extracted YouTube Music search metadata", searchParams);
+        return this.searchSpotify(searchParams);
+      },
+    );
+  }
+
+  private async ensureSpotifyToken(): Promise<void> {
+    if (this.now() < this.spotifyTokenExpiresAt - TOKEN_REFRESH_BUFFER_MS)
       return;
-    }
-    
-    await this.refreshSpotifyToken();
-    
-    await this.ytMusic.initialize();
-    this.initialized = true;
-  }
 
-  private async refreshSpotifyToken(): Promise<void> {
-    logger.debug('Refreshing Spotify access token');
-    const credentials = await this.spotifyApi.clientCredentialsGrant();
-    this.spotifyApi.setAccessToken(credentials.body.access_token);
-    this.tokenExpiresAt = Date.now() + (credentials.body.expires_in * 1000) - 60000;
-    logger.debug('Spotify token refreshed', { expiresIn: credentials.body.expires_in });
-  }
-
-  private async ensureValidToken(): Promise<void> {
-    if (Date.now() >= this.tokenExpiresAt) {
-      await this.refreshSpotifyToken();
-    }
-  }
-
-  async convertSpotifyToYouTubeMusic(spotifyUrl: string): Promise<ConversionResult | null> {
-    logger.debug('Starting Spotify → YouTube Music conversion', { url: spotifyUrl });
-    
-    await this.initialize();
-    
-    const searchParams = await this.extractSpotifyMetadata(spotifyUrl);
-    if (!searchParams) {
-      logger.error('Failed to extract Spotify metadata', new Error('Invalid Spotify URL'), { url: spotifyUrl });
-      throw new Error('Invalid Spotify URL or unable to extract metadata');
+    if (!this.spotifyAuthentication) {
+      this.spotifyAuthentication = this.authenticateSpotify().finally(() => {
+        this.spotifyAuthentication = null;
+      });
     }
 
-    logger.debug('Extracted search params', searchParams);
-    return await this.searchYouTubeMusic(searchParams);
+    await this.spotifyAuthentication;
   }
 
-  async convertYouTubeMusicToSpotify(ytMusicUrl: string): Promise<ConversionResult | null> {
-    logger.debug('Starting YouTube Music → Spotify conversion', { url: ytMusicUrl });
-    
-    await this.initialize();
-    
-    const searchParams = await this.extractYouTubeMusicMetadata(ytMusicUrl);
-    if (!searchParams) {
-      logger.error('Failed to extract YouTube Music metadata', new Error('Invalid YouTube Music URL'), { url: ytMusicUrl });
-      throw new Error('Invalid YouTube Music URL or unable to extract metadata');
-    }
-
-    logger.debug('Extracted search params', searchParams);
-    return await this.searchSpotify(searchParams);
-  }
-
-  private async extractSpotifyMetadata(url: string): Promise<SearchParams | null> {
-    const trackMatch = url.match(/spotify\.com\/track\/([a-zA-Z0-9]+)/);
-    const albumMatch = url.match(/spotify\.com\/album\/([a-zA-Z0-9]+)/);
-    const artistMatch = url.match(/spotify\.com\/artist\/([a-zA-Z0-9]+)/);
-
+  private async authenticateSpotify(): Promise<void> {
     try {
-      if (trackMatch) {
-        const trackId = trackMatch[1];
-        const track = await this.spotifyApi.getTrack(trackId);
-        return {
-          name: track.body.name,
-          artist: track.body.artists[0]?.name,
-          album: track.body.album.name,
-          searchTypeHint: 'song',
-        };
-      } else if (albumMatch) {
-        const albumId = albumMatch[1];
-        const album = await this.spotifyApi.getAlbum(albumId);
-        return {
-          album: album.body.name,
-          artist: album.body.artists[0]?.name,
-          searchTypeHint: 'album',
-        };
-      } else if (artistMatch) {
-        const artistId = artistMatch[1];
-        const artist = await this.spotifyApi.getArtist(artistId);
-        return {
-          artist: artist.body.name,
-          searchTypeHint: 'artist',
-        };
-      }
+      const credentials = await this.withTimeout(
+        () => this.spotifyApi.clientCredentialsGrant(),
+        "Spotify authentication",
+      );
+
+      this.spotifyApi.setAccessToken(credentials.body.access_token);
+      this.spotifyTokenExpiresAt =
+        this.now() + credentials.body.expires_in * 1_000;
+      logger.debug("Spotify access token acquired", {
+        expiresInSeconds: credentials.body.expires_in,
+      });
     } catch (error) {
-      logger.error('Error fetching Spotify metadata', error as Error, { url });
-      return null;
+      if (error instanceof ConversionError) throw error;
+      throw new ConversionError(
+        "UPSTREAM_FAILURE",
+        "Spotify is temporarily unavailable. Please try again shortly.",
+        { cause: error },
+      );
     }
-
-    return null;
   }
 
-  private async extractYouTubeMusicMetadata(url: string): Promise<SearchParams | null> {
-    const videoMatch = url.match(/music\.youtube\.com\/watch\?v=([a-zA-Z0-9_-]+)/);
-    const playlistMatch = url.match(/music\.youtube\.com\/playlist\?list=([a-zA-Z0-9_-]+)/);
-    const channelMatch = url.match(/music\.youtube\.com\/channel\/([a-zA-Z0-9_-]+)/);
+  private async ensureYouTubeMusicInitialized(): Promise<void> {
+    if (this.ytMusicInitialized) return;
+
+    if (!this.ytMusicInitialization) {
+      this.ytMusicInitialization = this.withTimeout(
+        () => this.ytMusic.initialize().then(() => undefined),
+        "YouTube Music initialization",
+      )
+        .then(() => {
+          this.ytMusicInitialized = true;
+        })
+        .catch((error: unknown) => {
+          if (error instanceof ConversionError) throw error;
+          throw new ConversionError(
+            "UPSTREAM_FAILURE",
+            "YouTube Music is temporarily unavailable. Please try again shortly.",
+            { cause: error },
+          );
+        })
+        .finally(() => {
+          this.ytMusicInitialization = null;
+        });
+    }
+
+    await this.ytMusicInitialization;
+  }
+
+  private async spotifyRequest<T>(
+    operation: () => Promise<T>,
+    label: string,
+  ): Promise<T> {
+    await this.ensureSpotifyToken();
 
     try {
-      if (videoMatch) {
-        const videoId = videoMatch[1];
-        const song = await this.ytMusic.getSong(videoId);
-        
-        return {
-          name: song.name || '',
-          artist: song.artist?.name || '',
-          searchTypeHint: 'song',
-        };
-      } else if (playlistMatch) {
-        const playlistId = playlistMatch[1];
-        const album = await this.ytMusic.getAlbum(playlistId);
-        
-        return {
-          album: album.name || '',
-          artist: album.artist?.name || '',
-          searchTypeHint: 'album',
-        };
-      } else if (channelMatch) {
-        const channelId = channelMatch[1];
-        const artist = await this.ytMusic.getArtist(channelId);
-        
-        return {
-          artist: artist.name || '',
-          searchTypeHint: 'artist',
-        };
-      }
+      return await this.withTimeout(operation, label);
     } catch (error) {
-      logger.error('Error fetching YouTube Music metadata', error as Error, { url });
-      return null;
-    }
-
-    return null;
-  }
-
-  private async searchSpotify(params: SearchParams): Promise<ConversionResult | null> {
-    logger.debug('Spotify search started', params);
-    
-    try {
-      let searchQuery = '';
-      let searchType: 'track' | 'album' | 'artist' = 'track';
-
-      if (params.searchTypeHint === 'song') {
-        searchQuery = `track:${params.name || ''} artist:${params.artist || ''}`;
-        searchType = 'track';
-      } else if (params.searchTypeHint === 'album') {
-        searchQuery = `album:${params.album || ''} artist:${params.artist || ''}`;
-        searchType = 'album';
-      } else if (params.searchTypeHint === 'artist') {
-        searchQuery = params.artist || '';
-        searchType = 'artist';
+      if (isSpotifyUnauthorized(error)) {
+        this.spotifyTokenExpiresAt = 0;
+        await this.ensureSpotifyToken();
+        try {
+          return await this.withTimeout(operation, label);
+        } catch (retryError) {
+          if (retryError instanceof ConversionError) throw retryError;
+          throw new ConversionError(
+            "UPSTREAM_FAILURE",
+            "Spotify is temporarily unavailable. Please try again shortly.",
+            { cause: retryError },
+          );
+        }
       }
 
-      logger.debug('Spotify search query', { query: searchQuery, type: searchType });
-      const results = await this.spotifyApi.search(searchQuery, [searchType], { limit: 1 });
+      if (error instanceof ConversionError) throw error;
+      throw new ConversionError(
+        "UPSTREAM_FAILURE",
+        "Spotify is temporarily unavailable. Please try again shortly.",
+        { cause: error },
+      );
+    }
+  }
 
-      if (searchType === 'track' && results.body.tracks?.items.length) {
-        const track = results.body.tracks.items[0];
-        const result = {
-          url: track.external_urls.spotify,
+  private async youtubeMusicRequest<T>(
+    operation: () => Promise<T>,
+    label: string,
+  ): Promise<T> {
+    try {
+      return await this.withTimeout(operation, label);
+    } catch (error) {
+      if (error instanceof ConversionError) throw error;
+      throw new ConversionError(
+        "UPSTREAM_FAILURE",
+        "YouTube Music is temporarily unavailable. Please try again shortly.",
+        { cause: error },
+      );
+    }
+  }
+
+  private async withTimeout<T>(
+    operation: () => Promise<T>,
+    label: string,
+  ): Promise<T> {
+    let timeout: NodeJS.Timeout | undefined;
+
+    try {
+      return await Promise.race([
+        operation(),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => {
+            reject(
+              new ConversionError(
+                "UPSTREAM_TIMEOUT",
+                `${label} took too long. Please try again shortly.`,
+              ),
+            );
+          }, this.timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
+  private async extractSpotifyMetadata(
+    parsedUrl: ParsedSpotifyUrl,
+  ): Promise<SearchParams> {
+    if (parsedUrl.type === "track") {
+      const track = await this.spotifyRequest(
+        () => this.spotifyApi.getTrack(parsedUrl.id),
+        "Fetching the Spotify track",
+      );
+      return {
+        name: track.body.name,
+        artist: joinArtists(track.body.artists),
+        album: track.body.album.name,
+        durationMs: track.body.duration_ms,
+        searchTypeHint: "song",
+      };
+    }
+
+    if (parsedUrl.type === "album") {
+      const album = await this.spotifyRequest(
+        () => this.spotifyApi.getAlbum(parsedUrl.id),
+        "Fetching the Spotify album",
+      );
+      return {
+        album: album.body.name,
+        artist: joinArtists(album.body.artists),
+        searchTypeHint: "album",
+      };
+    }
+
+    const artist = await this.spotifyRequest(
+      () => this.spotifyApi.getArtist(parsedUrl.id),
+      "Fetching the Spotify artist",
+    );
+    return {
+      artist: artist.body.name,
+      searchTypeHint: "artist",
+    };
+  }
+
+  private async extractYouTubeMusicMetadata(
+    parsedUrl: ParsedYouTubeMusicUrl,
+  ): Promise<SearchParams> {
+    if (parsedUrl.type === "song") {
+      const song = await this.youtubeMusicRequest(
+        () => this.ytMusic.getSong(parsedUrl.id),
+        "Fetching the YouTube Music song",
+      );
+      return {
+        name: song.name,
+        artist: song.artist?.name,
+        durationMs: song.duration ? song.duration * 1_000 : undefined,
+        searchTypeHint: "song",
+      };
+    }
+
+    if (parsedUrl.type === "album") {
+      const album = await this.youtubeMusicRequest(
+        () => this.ytMusic.getAlbum(parsedUrl.id),
+        "Fetching the YouTube Music album",
+      );
+      return {
+        album: album.name,
+        artist: album.artist?.name,
+        searchTypeHint: "album",
+      };
+    }
+
+    const artist = await this.youtubeMusicRequest(
+      () => this.ytMusic.getArtist(parsedUrl.id),
+      "Fetching the YouTube Music artist",
+    );
+    return {
+      artist: artist.name,
+      searchTypeHint: "artist",
+    };
+  }
+
+  private async searchSpotify(
+    params: SearchParams,
+  ): Promise<ConversionResult | null> {
+    const source = sourceMetadata(params);
+    const searchType =
+      params.searchTypeHint === "song" ? "track" : params.searchTypeHint;
+    const query = spotifySearchQuery(params);
+
+    logger.debug("Spotify search started", { query, type: searchType });
+    const results = await this.spotifyRequest(
+      () =>
+        this.spotifyApi.search(query, [searchType], {
+          limit: SEARCH_RESULT_LIMIT,
+        }),
+      "Searching Spotify",
+    );
+
+    if (searchType === "track") {
+      const ranked = rankMatches(
+        source,
+        results.body.tracks?.items ?? [],
+        (track) => ({
           title: track.name,
-          description: `${track.artists[0]?.name} - ${track.album.name}`,
-          thumbnail: track.album.images[0]?.url,
-          type: 'song' as const,
-        };
-        logger.debug('Spotify track found', result);
-        return result;
-      } else if (searchType === 'album' && results.body.albums?.items.length) {
-        const album = results.body.albums.items[0];
-        const result = {
-          url: album.external_urls.spotify,
+          artist: joinArtists(track.artists),
+          album: track.album.name,
+          durationMs: track.duration_ms,
+        }),
+      );
+      return conversionFromRanked(ranked, (track, confidence) => ({
+        url: track.external_urls.spotify,
+        title: track.name,
+        description: [joinArtists(track.artists), track.album.name]
+          .filter(Boolean)
+          .join(" · "),
+        thumbnail: largestThumbnail(track.album.images),
+        type: "song",
+        confidence,
+      }));
+    }
+
+    if (searchType === "album") {
+      const ranked = rankMatches(
+        source,
+        results.body.albums?.items ?? [],
+        (album) => ({
           title: album.name,
-          description: `${album.artists[0]?.name} (${album.release_date?.substring(0, 4)})`,
-          thumbnail: album.images[0]?.url,
-          type: 'album' as const,
-        };
-        logger.debug('Spotify album found', result);
-        return result;
-      } else if (searchType === 'artist' && results.body.artists?.items.length) {
-        const artist = results.body.artists.items[0];
-        const result = {
-          url: artist.external_urls.spotify,
-          title: artist.name,
-          description: `${artist.followers?.total?.toLocaleString()} followers`,
-          thumbnail: artist.images[0]?.url,
-          type: 'artist' as const,
-        };
-        logger.debug('Spotify artist found', result);
-        return result;
-      }
-
-      logger.warn('Spotify search: no results', { query: searchQuery });
-      return null;
-    } catch (error) {
-      logger.error('Spotify search failed', error as Error, { params });
-      return null;
+          artist: joinArtists(album.artists),
+        }),
+      );
+      return conversionFromRanked(ranked, (album, confidence) => ({
+        url: album.external_urls.spotify,
+        title: album.name,
+        description: [
+          joinArtists(album.artists),
+          album.release_date?.substring(0, 4),
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        thumbnail: largestThumbnail(album.images),
+        type: "album",
+        confidence,
+      }));
     }
+
+    const ranked = rankMatches(
+      source,
+      results.body.artists?.items ?? [],
+      (artist) => ({ title: artist.name }),
+    );
+    return conversionFromRanked(ranked, (artist, confidence) => ({
+      url: artist.external_urls.spotify,
+      title: artist.name,
+      description:
+        artist.followers?.total === undefined
+          ? undefined
+          : `${artist.followers.total.toLocaleString()} followers`,
+      thumbnail: largestThumbnail(artist.images),
+      type: "artist",
+      confidence,
+    }));
   }
 
-  private async searchYouTubeMusic(params: SearchParams): Promise<ConversionResult | null> {
-    try {
-      let searchQuery = '';
+  private async searchYouTubeMusic(
+    params: SearchParams,
+  ): Promise<ConversionResult | null> {
+    const source = sourceMetadata(params);
+    const query = [params.name ?? params.album, params.artist]
+      .filter(Boolean)
+      .join(" ");
 
-      if (params.searchTypeHint === 'song') {
-        searchQuery = `${params.name} ${params.artist}`;
-      } else if (params.searchTypeHint === 'album') {
-        searchQuery = `${params.album} ${params.artist}`;
-      } else if (params.searchTypeHint === 'artist') {
-        searchQuery = `${params.artist}`;
-      }
+    logger.debug("YouTube Music search started", {
+      query,
+      type: params.searchTypeHint,
+    });
 
-      logger.debug('YouTube Music search started', { query: searchQuery, type: params.searchTypeHint });
-
-      if (params.searchTypeHint === 'song') {
-        const results = await this.ytMusic.searchSongs(searchQuery);
-        logger.debug('YouTube songs found', { count: results.length });
-        
-        if (results.length === 0) {
-          logger.warn('YouTube search: no songs found', { query: searchQuery });
-          return null;
-        }
-
-        const firstResult = results[0];
-        logger.debug('YouTube song selected', { videoId: firstResult.videoId, name: firstResult.name });
-
-        return {
-          url: `https://music.youtube.com/watch?v=${firstResult.videoId}`,
-          title: firstResult.name || '',
-          description: firstResult.artist?.name || '',
-          thumbnail: firstResult.thumbnails?.[0]?.url || '',
-          type: 'song',
-        };
-      } else if (params.searchTypeHint === 'album') {
-        const results = await this.ytMusic.searchAlbums(searchQuery);
-        logger.debug('YouTube albums found', { count: results.length });
-        
-        if (results.length === 0) {
-          logger.warn('YouTube search: no albums found', { query: searchQuery });
-          return null;
-        }
-
-        const firstResult = results[0];
-        logger.debug('YouTube album selected', { albumId: firstResult.albumId, name: firstResult.name });
-
-        return {
-          url: `https://music.youtube.com/browse/${firstResult.albumId}`,
-          title: firstResult.name || '',
-          description: `${firstResult.year || ''} - ${firstResult.artist?.name || ''}`.trim(),
-          thumbnail: firstResult.thumbnails?.[0]?.url || '',
-          type: 'album',
-        };
-      } else if (params.searchTypeHint === 'artist') {
-        const results = await this.ytMusic.searchArtists(searchQuery);
-        logger.debug('YouTube artists found', { count: results.length });
-        
-        if (results.length === 0) {
-          logger.warn('YouTube search: no artists found', { query: searchQuery });
-          return null;
-        }
-
-        const firstResult = results[0];
-        logger.debug('YouTube artist selected', { artistId: firstResult.artistId, name: firstResult.name });
-
-        return {
-          url: `https://music.youtube.com/channel/${firstResult.artistId}`,
-          title: firstResult.name || '',
-          description: '',
-          thumbnail: firstResult.thumbnails?.[0]?.url || '',
-          type: 'artist',
-        };
-      }
-
-      return null;
-    } catch (error) {
-      logger.error('YouTube Music search failed', error as Error, { params });
-      return null;
+    if (params.searchTypeHint === "song") {
+      const results = await this.youtubeMusicRequest(
+        () => this.ytMusic.searchSongs(query),
+        "Searching YouTube Music",
+      );
+      const ranked = rankMatches(source, results, (song) => ({
+        title: song.name,
+        artist: song.artist?.name,
+        album: song.album?.name,
+        durationMs: song.duration ? song.duration * 1_000 : undefined,
+      }));
+      return conversionFromRanked(ranked, (song, confidence) => ({
+        url: `https://music.youtube.com/watch?v=${song.videoId}`,
+        title: song.name,
+        description: [song.artist?.name, song.album?.name]
+          .filter(Boolean)
+          .join(" · "),
+        thumbnail: largestThumbnail(song.thumbnails),
+        type: "song",
+        confidence,
+      }));
     }
+
+    if (params.searchTypeHint === "album") {
+      const results = await this.youtubeMusicRequest(
+        () => this.ytMusic.searchAlbums(query),
+        "Searching YouTube Music",
+      );
+      const ranked = rankMatches(source, results, (album) => ({
+        title: album.name,
+        artist: album.artist?.name,
+      }));
+      return conversionFromRanked(ranked, (album, confidence) => ({
+        url: `https://music.youtube.com/browse/${album.albumId}`,
+        title: album.name,
+        description: [album.artist?.name, album.year]
+          .filter(Boolean)
+          .join(" · "),
+        thumbnail: largestThumbnail(album.thumbnails),
+        type: "album",
+        confidence,
+      }));
+    }
+
+    const results = await this.youtubeMusicRequest(
+      () => this.ytMusic.searchArtists(query),
+      "Searching YouTube Music",
+    );
+    const ranked = rankMatches(source, results, (artist) => ({
+      title: artist.name,
+    }));
+    return conversionFromRanked(ranked, (artist, confidence) => ({
+      url: `https://music.youtube.com/channel/${artist.artistId}`,
+      title: artist.name,
+      thumbnail: largestThumbnail(artist.thumbnails),
+      type: "artist",
+      confidence,
+    }));
   }
+}
+
+function conversionFromRanked<T>(
+  ranked: RankedMatch<T>[],
+  convert: (candidate: T, confidence: number) => ConversionCandidate,
+): ConversionResult | null {
+  const best = ranked[0];
+  if (!best || best.score < 0.6) return null;
+
+  const matches = ranked
+    .filter((match) => match.score >= 0.45)
+    .slice(0, 5)
+    .map((match) => convert(match.candidate, match.score));
+  const [result, ...alternatives] = matches;
+
+  return {
+    ...result,
+    alternatives: alternatives.length > 0 ? alternatives : undefined,
+  };
+}
+
+function sourceMetadata(params: SearchParams): MatchMetadata {
+  return {
+    title: params.name ?? params.album ?? params.artist ?? "",
+    artist: params.searchTypeHint === "artist" ? undefined : params.artist,
+    album: params.album,
+    durationMs: params.durationMs,
+  };
+}
+
+function spotifySearchQuery(params: SearchParams): string {
+  if (params.searchTypeHint === "song") {
+    return `track:"${spotifySearchTerm(params.name)}" artist:"${spotifySearchTerm(params.artist)}"`;
+  }
+  if (params.searchTypeHint === "album") {
+    return `album:"${spotifySearchTerm(params.album)}" artist:"${spotifySearchTerm(params.artist)}"`;
+  }
+  return spotifySearchTerm(params.artist);
+}
+
+function spotifySearchTerm(value: string | undefined): string {
+  return (value ?? "").replace(/["\\]/g, " ").trim();
+}
+
+function joinArtists(artists: readonly { name: string }[]): string {
+  return artists
+    .map((artist) => artist.name)
+    .filter(Boolean)
+    .join(", ");
+}
+
+function largestThumbnail(
+  images: readonly {
+    url: string;
+    width?: number | null;
+    height?: number | null;
+  }[],
+): string | undefined {
+  return [...images].sort(
+    (left, right) =>
+      (right.width ?? 0) * (right.height ?? 0) -
+      (left.width ?? 0) * (left.height ?? 0),
+  )[0]?.url;
+}
+
+function isSpotifyUnauthorized(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+
+  const candidate = error as {
+    statusCode?: number;
+    body?: { error?: { status?: number } };
+  };
+  return candidate.statusCode === 401 || candidate.body?.error?.status === 401;
 }

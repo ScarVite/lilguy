@@ -7,12 +7,12 @@ import {
 import { executeConversion } from "./execute-conversion";
 
 export const data = new SlashCommandBuilder()
-  .setName("spotify-to-yt-music")
-  .setDescription("Convert a Spotify link to a YouTube Music link")
+  .setName("convert")
+  .setDescription("Convert a Spotify or YouTube Music link automatically")
   .addStringOption((option) =>
     option
       .setName("url")
-      .setDescription("A Spotify track, album, or artist URL")
+      .setDescription("A Spotify or YouTube Music URL")
       .setRequired(true),
   )
   .setIntegrationTypes(
@@ -30,5 +30,5 @@ export async function execute(
 ): Promise<void> {
   if (!interaction.isChatInputCommand()) return;
   const input = interaction.options.getString("url", true).trim();
-  await executeConversion(interaction, input, "spotify");
+  await executeConversion(interaction, input);
 }

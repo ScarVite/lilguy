@@ -1,25 +1,32 @@
 {
   "name": "lilguy",
   "version": "1.0.0",
-  "description": "Discord bot that converts Spotify links to YouTube Music links",
+  "description": "Discord bot that converts links between Spotify and YouTube Music",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test dist/services/url-parser.test.js dist/services/matching.test.js dist/services/converter.test.js dist/services/ttl-cache.test.js dist/services/candidate-selection.test.js dist/services/xivapi.test.js",
+    "check": "npm run typecheck && npm test",
+    "prestart": "npm run build",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "deploy-commands": "ts-node src/deploy-commands.ts"
   },
   "dependencies": {
-    "@sentry/node": "^10.44.0",
-    "discord.js": "^14.16.3",
+    "@sentry/node": "^10.63.0",
+    "discord.js": "^14.26.4",
     "dotenv": "^16.4.7",
     "spotify-web-api-node": "^5.0.2",
     "ytmusic-api": "^5.3.1"
   },
   "devDependencies": {
-    "@types/node": "^22.10.5",
+    "@types/node": "^22.20.0",
     "@types/spotify-web-api-node": "^5.0.11",
     "ts-node": "^10.9.2",
     "typescript": "^5.7.3"
+  },
+  "overrides": {
+    "undici": "6.27.0"
   }
 }
