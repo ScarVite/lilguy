@@ -15,6 +15,7 @@ import * as orchestrion from "./commands/orchestrion";
 import { missingRuntimeEnvironment } from "./services/converter-instance";
 import { NO_MENTIONS } from "./commands/response";
 import { handleMatchSelection } from "./commands/match-selection";
+import { handleOrchestrionSearch } from "./commands/orchestrion-search";
 
 initSentry();
 
@@ -46,6 +47,10 @@ client.once(Events.ClientReady, (readyClient) => {
 client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isStringSelectMenu()) {
     if (await handleMatchSelection(interaction)) return;
+  }
+
+  if (interaction.isButton()) {
+    if (await handleOrchestrionSearch(interaction)) return;
   }
 
   if (

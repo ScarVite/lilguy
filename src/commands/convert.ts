@@ -8,11 +8,11 @@ import { executeConversion } from "./execute-conversion";
 
 export const data = new SlashCommandBuilder()
   .setName("convert")
-  .setDescription("Convert a Spotify or YouTube Music link automatically")
+  .setDescription("Convert a Spotify, YouTube Music, Tidal, or Apple Music link")
   .addStringOption((option) =>
     option
       .setName("url")
-      .setDescription("A Spotify or YouTube Music URL")
+      .setDescription("A Spotify, YouTube Music, Tidal, or Apple Music URL")
       .setRequired(true),
   )
   .setIntegrationTypes(

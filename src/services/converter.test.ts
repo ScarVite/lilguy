@@ -157,3 +157,82 @@ test("refreshes and retries once when Spotify rejects a token", async () => {
   assert.equal(authenticationCalls, 2);
   assert.equal(searchCalls, 2);
 });
+
+test("converts Tidal and Apple Music links using their metadata", async () => {
+  const spotifyApi = {
+    async clientCredentialsGrant() {
+      return {
+        body: { access_token: "token", expires_in: 3_600, token_type: "Bearer" },
+      };
+    },
+    setAccessToken() {},
+    async search() {
+      return {
+        body: {
+          tracks: {
+            items: [
+              {
+                name: "Answers",
+                artists: [{ name: "Susan Calloway" }],
+                album: { name: "Before Meteor", images: [] },
+                duration_ms: 425_000,
+                external_urls: { spotify: "https://open.spotify.com/track/answers" },
+              },
+            ],
+          },
+        },
+      };
+    },
+  } as unknown as SpotifyWebApi;
+  const converter = new MusicConverter("id", "secret", {
+    spotifyApi,
+    ytMusic: { async initialize() {} } as unknown as YTMusic,
+    fetch: async (input) => {
+      const url = input.toString();
+      const body = url.includes("auth.tidal.com")
+        ? { access_token: "tidal-token", expires_in: 3_600 }
+        : url.includes("openapi.tidal.com")
+          ? {
+              data: {
+                type: "tracks",
+                id: "74695970",
+                attributes: { title: "Answers" },
+                relationships: {
+                  artists: { data: [{ type: "artists", id: "1" }] },
+                },
+              },
+              included: [
+                { type: "artists", id: "1", attributes: { name: "Susan Calloway" } },
+              ],
+            }
+        : {
+            results: [
+              {
+                trackId: 987654321,
+                trackName: "Answers",
+                artistName: "Susan Calloway",
+                collectionName: "Before Meteor",
+                trackTimeMillis: 425_000,
+              },
+            ],
+          };
+      return new Response(JSON.stringify(body), { status: 200 });
+    },
+    tidalClientId: "tidal-id",
+    tidalClientSecret: "tidal-secret",
+  });
+
+  assert.equal(
+    (await converter.convertTidalToSpotify("https://tidal.com/track/74695970"))
+      ?.title,
+    "Answers",
+  );
+  assert.equal(
+    (
+      await converter.convertAppleMusicToSpotify(
+        "https://music.apple.com/us/album/answers/123456789?i=987654321",
+      )
+    )?.title,
+    "Answers",
+  );
+});

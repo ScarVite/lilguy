@@ -1,5 +1,6 @@
 export type SpotifyResourceType = "track" | "album" | "artist";
 export type YouTubeMusicResourceType = "song" | "album" | "artist" | "playlist";
+export type ExternalMusicResourceType = "song" | "album" | "artist";
 
 export interface ParsedSpotifyUrl {
   service: "spotify";
@@ -15,10 +16,30 @@ export interface ParsedYouTubeMusicUrl {
   canonicalUrl: string;
 }
 
-export type ParsedMusicUrl = ParsedSpotifyUrl | ParsedYouTubeMusicUrl;
+export interface ParsedTidalUrl {
+  service: "tidal";
+  type: ExternalMusicResourceType;
+  id: string;
+  canonicalUrl: string;
+}
+
+export interface ParsedAppleMusicUrl {
+  service: "appleMusic";
+  type: ExternalMusicResourceType;
+  id: string;
+  storefront: string;
+  canonicalUrl: string;
+}
+
+export type ParsedMusicUrl =
+  | ParsedSpotifyUrl
+  | ParsedYouTubeMusicUrl
+  | ParsedTidalUrl
+  | ParsedAppleMusicUrl;
 
 const SPOTIFY_ID_PATTERN = /^[A-Za-z0-9]{22}$/;
 const YOUTUBE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+const NUMERIC_ID_PATTERN = /^\d+$/;
 
 function safeUrl(input: string): URL | null {
   try {
@@ -87,8 +108,77 @@ export function parseYouTubeMusicUrl(
   return null;
 }
 
+export function parseTidalUrl(input: string): ParsedTidalUrl | null {
+  const url = safeUrl(input);
+  const hostname = url?.hostname.toLowerCase();
+  if (!url || (hostname !== "tidal.com" && hostname !== "www.tidal.com")) {
+    return null;
+  }
+
+  const segments = url.pathname.split("/").filter(Boolean);
+  const resourceIndex = segments[0]?.toLowerCase() === "browse" ? 1 : 0;
+  const resource = segments[resourceIndex]?.toLowerCase();
+  const id = segments[resourceIndex + 1];
+  const type = resource === "track" ? "song" : resource;
+  if (
+    !id ||
+    !NUMERIC_ID_PATTERN.test(id) ||
+    (type !== "song" && type !== "album" && type !== "artist")
+  ) {
+    return null;
+  }
+
+  return {
+    service: "tidal",
+    type,
+    id,
+    canonicalUrl: `https://tidal.com/browse/${resource}/${id}`,
+  };
+}
+
+export function parseAppleMusicUrl(input: string): ParsedAppleMusicUrl | null {
+  const url = safeUrl(input);
+  if (!url || url.hostname.toLowerCase() !== "music.apple.com") return null;
+
+  const segments = url.pathname.split("/").filter(Boolean);
+  const [storefront, resource] = segments;
+  const resourceId = segments.at(-1);
+  if (
+    !storefront ||
+    !resourceId ||
+    !NUMERIC_ID_PATTERN.test(resourceId) ||
+    !["song", "album", "artist"].includes(resource)
+  ) {
+    return null;
+  }
+
+  const selectedTrackId = resource === "album" ? url.searchParams.get("i") : null;
+  if (selectedTrackId && !NUMERIC_ID_PATTERN.test(selectedTrackId)) return null;
+  const type: ExternalMusicResourceType = selectedTrackId
+    ? "song"
+    : (resource as ExternalMusicResourceType);
+  const id = selectedTrackId ?? resourceId;
+  const canonicalUrl = new URL(url.toString());
+  for (const key of [...canonicalUrl.searchParams.keys()]) {
+    if (key !== "i") canonicalUrl.searchParams.delete(key);
+  }
+
+  return {
+    service: "appleMusic",
+    type,
+    id,
+    storefront: storefront.toLowerCase(),
+    canonicalUrl: canonicalUrl.toString(),
+  };
+}
+
 export function parseMusicUrl(input: string): ParsedMusicUrl | null {
-  return parseSpotifyUrl(input) ?? parseYouTubeMusicUrl(input);
+  return (
+    parseSpotifyUrl(input) ??
+    parseYouTubeMusicUrl(input) ??
+    parseTidalUrl(input) ??
+    parseAppleMusicUrl(input)
+  );
 }
 
 export function findMusicUrl(input: string): ParsedMusicUrl | null {

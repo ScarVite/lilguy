@@ -16,7 +16,11 @@ export function getMusicConverter(): MusicConverter {
     );
   }
 
-  converter = new MusicConverter(clientId, clientSecret);
+  converter = new MusicConverter(clientId, clientSecret, {
+    tidalClientId: process.env.TIDAL_CLIENT_ID,
+    tidalClientSecret: process.env.TIDAL_CLIENT_SECRET,
+    tidalCountryCode: process.env.TIDAL_COUNTRY_CODE,
+  });
   return converter;
 }
 

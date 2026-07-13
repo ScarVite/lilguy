@@ -11,6 +11,10 @@ import {
 import { NO_MENTIONS } from "./response";
 import { XivApiClient, XivApiError } from "../services/xivapi";
 import { logger } from "../utils/logger";
+import {
+  createOrchestrionSearch,
+  ORCHESTRION_SEARCH_CUSTOM_ID_PREFIX,
+} from "../services/orchestrion-search";
 
 const xivApi = new XivApiClient();
 
@@ -79,19 +83,32 @@ export async function execute(
 
     if (result.iconUrl) embed.setThumbnail(result.iconUrl);
 
-    const musicQuery = `${result.name} FINAL FANTASY XIV`;
+    const musicSearch = createOrchestrionSearch(result.name);
+    const musicQuery = musicSearch.query;
     const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
-        .setStyle(ButtonStyle.Link)
+        .setStyle(ButtonStyle.Primary)
         .setLabel("Search Spotify")
-        .setURL(
-          `https://open.spotify.com/search/${encodeURIComponent(musicQuery)}`,
+        .setCustomId(
+          `${ORCHESTRION_SEARCH_CUSTOM_ID_PREFIX}spotify:${musicSearch.token}`,
+        ),
+      new ButtonBuilder()
+        .setStyle(ButtonStyle.Primary)
+        .setLabel("Search YouTube")
+        .setCustomId(
+          `${ORCHESTRION_SEARCH_CUSTOM_ID_PREFIX}youtubeMusic:${musicSearch.token}`,
         ),
       new ButtonBuilder()
         .setStyle(ButtonStyle.Link)
-        .setLabel("Search YouTube Music")
+        .setLabel("Search Tidal")
         .setURL(
-          `https://music.youtube.com/search?q=${encodeURIComponent(musicQuery)}`,
+          `https://tidal.com/search?q=${encodeURIComponent(musicQuery)}`,
+        ),
+      new ButtonBuilder()
+        .setStyle(ButtonStyle.Link)
+        .setLabel("Search Apple Music")
+        .setURL(
+          `https://music.apple.com/us/search?term=${encodeURIComponent(musicQuery)}`,
         ),
     );
 

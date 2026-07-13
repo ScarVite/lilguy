@@ -37,7 +37,11 @@ export async function executeConversion(
     const result =
       parsedUrl.service === "spotify"
         ? await converter.convertSpotifyToYouTubeMusic(parsedUrl.canonicalUrl)
-        : await converter.convertYouTubeMusicToSpotify(parsedUrl.canonicalUrl);
+        : parsedUrl.service === "youtubeMusic"
+          ? await converter.convertYouTubeMusicToSpotify(parsedUrl.canonicalUrl)
+          : parsedUrl.service === "tidal"
+            ? await converter.convertTidalToSpotify(parsedUrl.canonicalUrl)
+            : await converter.convertAppleMusicToSpotify(parsedUrl.canonicalUrl);
     const target =
       parsedUrl.service === "spotify" ? "youtubeMusic" : "spotify";
 

@@ -5,7 +5,7 @@ A Discord slash command bot that converts between Spotify and YouTube Music link
 ## Features
 
 - Convert Spotify tracks, albums, and artists to YouTube Music
-- Convert YouTube Music songs, albums, and artists to Spotify
+- Convert YouTube Music, Tidal, and Apple Music songs, albums, and artists to Spotify
 - Auto-detect either service with one `/convert` command
 - Convert links from existing messages through Discord's message actions
 - Validate match quality using title, artist, album, and duration metadata
@@ -50,6 +50,8 @@ Fill in the following in `.env`:
 - `DISCORD_CLIENT_ID` - Your Discord application client ID
 - `SPOTIFY_CLIENT_ID` - Your Spotify application client ID
 - `SPOTIFY_CLIENT_SECRET` - Your Spotify application client secret
+- `TIDAL_CLIENT_ID` and `TIDAL_CLIENT_SECRET` - Required to convert Tidal links
+- `TIDAL_COUNTRY_CODE` - Optional two-letter catalog country code; defaults to `US`
 - `SENTRY_DSN` - (Optional) Your Sentry DSN for error tracking in production
 - `NODE_ENV` - Set to `production` for production deployment, `development` for local testing
 
@@ -115,8 +117,9 @@ YouTube Music album links use the `/browse/...` format.
 /orchestrion query:Answers
 ```
 
-Orchestrion results include Spotify and YouTube Music search shortcuts. When a
-roll is marketable, the result also links to its Universalis market page.
+Orchestrion results can use the bot to find a direct Spotify or YouTube match,
+and also include Tidal and Apple Music search shortcuts. When a roll is
+marketable, the result also links to its Universalis market page.
 
 ## How It Works
 

@@ -4,9 +4,13 @@ import { logger } from "../utils/logger";
 import { ConversionError } from "./errors";
 import { MatchMetadata, RankedMatch, rankMatches } from "./matching";
 import {
+  ParsedAppleMusicUrl,
   ParsedSpotifyUrl,
+  ParsedTidalUrl,
   ParsedYouTubeMusicUrl,
+  parseAppleMusicUrl,
   parseSpotifyUrl,
+  parseTidalUrl,
   parseYouTubeMusicUrl,
 } from "./url-parser";
 import { TtlCache } from "./ttl-cache";
@@ -23,6 +27,7 @@ export interface SearchParams {
   artist?: string;
   durationMs?: number;
   searchTypeHint: "song" | "album" | "artist";
+  searchQuery?: string;
 }
 
 export interface ConversionCandidate {
@@ -44,6 +49,10 @@ export interface MusicConverterDependencies {
   now?: () => number;
   timeoutMs?: number;
   cache?: TtlCache<string, ConversionResult | null>;
+  fetch?: typeof fetch;
+  tidalClientId?: string;
+  tidalClientSecret?: string;
+  tidalCountryCode?: string;
 }
 
 export class MusicConverter {
@@ -59,6 +68,13 @@ export class MusicConverter {
     string,
     ConversionResult | null
   >;
+  private readonly fetch: typeof fetch;
+  private readonly tidalClientId?: string;
+  private readonly tidalClientSecret?: string;
+  private readonly tidalCountryCode: string;
+  private tidalAccessToken = "";
+  private tidalTokenExpiresAt = 0;
+  private tidalAuthentication: Promise<void> | null = null;
 
   constructor(
     spotifyClientId: string,
@@ -81,6 +97,10 @@ export class MusicConverter {
         maxEntries: CONVERSION_CACHE_MAX_ENTRIES,
         now: this.now,
       });
+    this.fetch = dependencies.fetch ?? fetch;
+    this.tidalClientId = dependencies.tidalClientId;
+    this.tidalClientSecret = dependencies.tidalClientSecret;
+    this.tidalCountryCode = dependencies.tidalCountryCode ?? "US";
   }
 
   async initialize(): Promise<void> {
@@ -88,6 +108,26 @@ export class MusicConverter {
       this.ensureSpotifyToken(),
       this.ensureYouTubeMusicInitialized(),
     ]);
+  }
+
+  async searchTrack(
+    service: "spotify" | "youtubeMusic",
+    name: string,
+    searchQuery = name,
+  ): Promise<ConversionResult | null> {
+    const params: SearchParams = {
+      name,
+      searchQuery,
+      searchTypeHint: "song",
+    };
+
+    if (service === "spotify") {
+      await this.ensureSpotifyToken();
+      return this.searchSpotify(params);
+    }
+
+    await this.ensureYouTubeMusicInitialized();
+    return this.searchYouTubeMusic(params);
   }
 
   async convertSpotifyToYouTubeMusic(
@@ -148,6 +188,41 @@ export class MusicConverter {
         logger.debug("Extracted YouTube Music search metadata", searchParams);
         return this.searchSpotify(searchParams);
       },
+    );
+  }
+
+  async convertTidalToSpotify(
+    tidalUrl: string,
+  ): Promise<ConversionResult | null> {
+    const parsedUrl = parseTidalUrl(tidalUrl);
+    if (!parsedUrl) {
+      throw new ConversionError(
+        "INVALID_URL",
+        "That does not look like a supported Tidal track, album, or artist link.",
+      );
+    }
+
+    return this.conversionCache.getOrCreate(
+      `tidal:${parsedUrl.canonicalUrl}`,
+      async () => this.searchSpotify(await this.extractTidalMetadata(parsedUrl)),
+    );
+  }
+
+  async convertAppleMusicToSpotify(
+    appleMusicUrl: string,
+  ): Promise<ConversionResult | null> {
+    const parsedUrl = parseAppleMusicUrl(appleMusicUrl);
+    if (!parsedUrl) {
+      throw new ConversionError(
+        "INVALID_URL",
+        "That does not look like a supported Apple Music song, album, or artist link.",
+      );
+    }
+
+    return this.conversionCache.getOrCreate(
+      `appleMusic:${parsedUrl.canonicalUrl}`,
+      async () =>
+        this.searchSpotify(await this.extractAppleMusicMetadata(parsedUrl)),
     );
   }
 
@@ -365,13 +440,181 @@ export class MusicConverter {
     };
   }
 
+  private async extractTidalMetadata(
+    parsedUrl: ParsedTidalUrl,
+  ): Promise<SearchParams> {
+    const endpoint = new URL(
+      `https://openapi.tidal.com/v2/${parsedUrl.type === "song" ? "tracks" : `${parsedUrl.type}s`}/${parsedUrl.id}`,
+    );
+    endpoint.searchParams.set("countryCode", this.tidalCountryCode);
+    endpoint.searchParams.set("include", "artists,albums");
+    const metadata = await this.tidalJson(endpoint, "Fetching Tidal metadata");
+    const data = recordProperty(metadata, "data") ?? metadata;
+    const attributes = recordProperty(data, "attributes") ?? data;
+    const title =
+      stringProperty(attributes, parsedUrl.type === "song" ? "title" : "name") ??
+      stringProperty(attributes, "title");
+    const artist = tidalArtistName(data, metadata);
+    if (!title) {
+      throw new ConversionError(
+        "UPSTREAM_FAILURE",
+        "Tidal could not provide metadata for that link. Please try another link.",
+      );
+    }
+
+    if (parsedUrl.type === "artist") {
+      return { artist: title, searchTypeHint: "artist" };
+    }
+    if (parsedUrl.type === "album") {
+      return { album: title, artist, searchTypeHint: "album" };
+    }
+    return { name: title, artist, searchTypeHint: "song" };
+  }
+
+  private async extractAppleMusicMetadata(
+    parsedUrl: ParsedAppleMusicUrl,
+  ): Promise<SearchParams> {
+    const endpoint = new URL("https://itunes.apple.com/lookup");
+    endpoint.searchParams.set("id", parsedUrl.id);
+    endpoint.searchParams.set("country", parsedUrl.storefront.toUpperCase());
+    const response = await this.externalJson(endpoint, "Fetching Apple Music metadata");
+    const results = arrayProperty(response, "results");
+    const metadata =
+      results.find((result) => stringProperty(result, "trackId") === parsedUrl.id) ??
+      results[0];
+    if (!metadata) throw externalMetadataError("Apple Music");
+
+    const artist = stringProperty(metadata, "artistName");
+    if (parsedUrl.type === "artist") {
+      if (!artist) throw externalMetadataError("Apple Music");
+      return { artist, searchTypeHint: "artist" };
+    }
+    if (parsedUrl.type === "album") {
+      const album = stringProperty(metadata, "collectionName");
+      if (!album) throw externalMetadataError("Apple Music");
+      return { album, artist, searchTypeHint: "album" };
+    }
+
+    const name = stringProperty(metadata, "trackName");
+    if (!name) throw externalMetadataError("Apple Music");
+    return {
+      name,
+      artist,
+      album: stringProperty(metadata, "collectionName"),
+      durationMs: numberProperty(metadata, "trackTimeMillis"),
+      searchTypeHint: "song",
+    };
+  }
+
+  private async ensureTidalToken(): Promise<void> {
+    if (this.now() < this.tidalTokenExpiresAt - TOKEN_REFRESH_BUFFER_MS) return;
+    if (!this.tidalClientId || !this.tidalClientSecret) {
+      throw new ConversionError(
+        "CONFIGURATION",
+        "The bot's Tidal integration is not configured. Please contact the bot owner.",
+      );
+    }
+
+    if (!this.tidalAuthentication) {
+      this.tidalAuthentication = this.authenticateTidal().finally(() => {
+        this.tidalAuthentication = null;
+      });
+    }
+    await this.tidalAuthentication;
+  }
+
+  private async authenticateTidal(): Promise<void> {
+    const credentials = Buffer.from(
+      `${this.tidalClientId}:${this.tidalClientSecret}`,
+    ).toString("base64");
+    try {
+      const response = await this.withTimeout(
+        () =>
+          this.fetch("https://auth.tidal.com/v1/oauth2/token", {
+            method: "POST",
+            headers: {
+              Authorization: `Basic ${credentials}`,
+              "Content-Type": "application/x-www-form-urlencoded",
+            },
+            body: "grant_type=client_credentials",
+          }),
+        "Tidal authentication",
+      );
+      if (!response.ok) {
+        if (response.status === 400 || response.status === 401) {
+          throw new ConversionError(
+            "CONFIGURATION",
+            "Tidal rejected the bot credentials. Check TIDAL_CLIENT_ID and TIDAL_CLIENT_SECRET.",
+          );
+        }
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const payload = await response.json();
+      const accessToken = stringProperty(payload, "access_token");
+      const expiresIn = numberProperty(payload, "expires_in");
+      if (!accessToken || !expiresIn) throw new Error("Invalid token response");
+      this.tidalAccessToken = accessToken;
+      this.tidalTokenExpiresAt = this.now() + expiresIn * 1_000;
+    } catch (error) {
+      if (error instanceof ConversionError) throw error;
+      throw new ConversionError(
+        "UPSTREAM_FAILURE",
+        "Tidal is temporarily unavailable. Please try again shortly.",
+        { cause: error },
+      );
+    }
+  }
+
+  private async tidalJson(url: URL, label: string): Promise<unknown> {
+    await this.ensureTidalToken();
+    try {
+      const response = await this.withTimeout(
+        () =>
+          this.fetch(url, {
+            headers: {
+              Accept: "application/vnd.tidal.v1+json",
+              Authorization: `Bearer ${this.tidalAccessToken}`,
+            },
+          }),
+        label,
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      if (error instanceof ConversionError) throw error;
+      throw new ConversionError(
+        "UPSTREAM_FAILURE",
+        "Tidal is temporarily unavailable. Please try again shortly.",
+        { cause: error },
+      );
+    }
+  }
+
+  private async externalJson(url: URL, label: string): Promise<unknown> {
+    try {
+      const response = await this.withTimeout(
+        () => this.fetch(url, { headers: { Accept: "application/json" } }),
+        label,
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      if (error instanceof ConversionError) throw error;
+      throw new ConversionError(
+        "UPSTREAM_FAILURE",
+        "The music service is temporarily unavailable. Please try again shortly.",
+        { cause: error },
+      );
+    }
+  }
+
   private async searchSpotify(
     params: SearchParams,
   ): Promise<ConversionResult | null> {
     const source = sourceMetadata(params);
     const searchType =
       params.searchTypeHint === "song" ? "track" : params.searchTypeHint;
-    const query = spotifySearchQuery(params);
+    const query = params.searchQuery ?? spotifySearchQuery(params);
 
     logger.debug("Spotify search started", { query, type: searchType });
     const results = await this.spotifyRequest(
@@ -451,9 +694,9 @@ export class MusicConverter {
     params: SearchParams,
   ): Promise<ConversionResult | null> {
     const source = sourceMetadata(params);
-    const query = [params.name ?? params.album, params.artist]
-      .filter(Boolean)
-      .join(" ");
+    const query =
+      params.searchQuery ??
+      [params.name ?? params.album, params.artist].filter(Boolean).join(" ");
 
     logger.debug("YouTube Music search started", {
       query,
@@ -519,6 +762,63 @@ export class MusicConverter {
       confidence,
     }));
   }
+}
+
+function externalMetadataError(service: string): ConversionError {
+  return new ConversionError(
+    "UPSTREAM_FAILURE",
+    `${service} could not provide metadata for that link. Please try another link.`,
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function recordProperty(
+  value: unknown,
+  key: string,
+): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined;
+  const property = value[key];
+  return isRecord(property) ? property : undefined;
+}
+
+function stringProperty(value: unknown, key: string): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const property = value[key];
+  if (typeof property === "string") return property;
+  if (typeof property === "number") return String(property);
+  return undefined;
+}
+
+function numberProperty(value: unknown, key: string): number | undefined {
+  if (!isRecord(value)) return undefined;
+  const property = value[key];
+  return typeof property === "number" ? property : undefined;
+}
+
+function arrayProperty(value: unknown, key: string): unknown[] {
+  if (!isRecord(value)) return [];
+  const property = value[key];
+  return Array.isArray(property) ? property : [];
+}
+
+function tidalArtistName(data: unknown, response: unknown): string | undefined {
+  const relationships = recordProperty(data, "relationships");
+  const artistRelationship = recordProperty(relationships, "artists");
+  const artists = arrayProperty(artistRelationship, "data");
+  const artistId = stringProperty(artists[0], "id");
+  const included = arrayProperty(response, "included");
+  const artist = included.find(
+    (item) =>
+      stringProperty(item, "type") === "artists" &&
+      stringProperty(item, "id") === artistId,
+  );
+  return (
+    stringProperty(recordProperty(artist, "attributes"), "name") ??
+    stringProperty(recordProperty(data, "attributes"), "artistName")
+  );
 }
 
 function conversionFromRanked<T>(

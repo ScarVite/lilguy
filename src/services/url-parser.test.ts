@@ -3,7 +3,9 @@ import test from "node:test";
 import {
   findMusicUrl,
   parseMusicUrl,
+  parseAppleMusicUrl,
   parseSpotifyUrl,
+  parseTidalUrl,
   parseYouTubeMusicUrl,
 } from "./url-parser";
 
@@ -68,6 +70,32 @@ test("parses YouTube Music songs, albums, artists, and playlists", () => {
   );
 });
 
+test("parses Tidal and Apple Music links", () => {
+  assert.deepEqual(parseTidalUrl("https://tidal.com/track/74695970/u"), {
+    service: "tidal",
+    type: "song",
+    id: "74695970",
+    canonicalUrl: "https://tidal.com/browse/track/74695970",
+  });
+  assert.equal(
+    parseTidalUrl("https://tidal.com/browse/album/123456")?.type,
+    "album",
+  );
+  assert.deepEqual(
+    parseAppleMusicUrl(
+      "https://music.apple.com/us/album/example/123456789?i=987654321&foo=bar",
+    ),
+    {
+      service: "appleMusic",
+      type: "song",
+      id: "987654321",
+      storefront: "us",
+      canonicalUrl:
+        "https://music.apple.com/us/album/example/123456789?i=987654321",
+    },
+  );
+});
+
 test("auto-detects services and finds links inside message text", () => {
   const spotifyId = "4uLU6hMCjMI75M1A2tKUQC";
   assert.equal(
@@ -77,6 +105,10 @@ test("auto-detects services and finds links inside message text", () => {
   assert.equal(
     parseMusicUrl("https://music.youtube.com/watch?v=dQw4w9WgXcQ")?.service,
     "youtubeMusic",
+  );
+  assert.equal(
+    parseMusicUrl("https://tidal.com/browse/track/74695970")?.service,
+    "tidal",
   );
   assert.equal(
     findMusicUrl(
