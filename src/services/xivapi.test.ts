@@ -61,6 +61,63 @@ test("returns null when no orchestrion track matches", async () => {
   assert.equal(await client.findOrchestrion("not a real track"), null);
 });
 
+test("resolves an orchestrion track from an encounter name and BGM", async () => {
+  const requestedUrls: URL[] = [];
+  const fetcher = async (input: string | URL | Request) => {
+    const url = new URL(input.toString());
+    requestedUrls.push(url);
+    const sheet = url.searchParams.get("sheets");
+    const query = url.searchParams.get("query");
+
+    if (sheet === "Orchestrion" && query?.startsWith("Name~")) {
+      return jsonResponse({ results: [] });
+    }
+    if (sheet === "ContentFinderCondition") {
+      return jsonResponse({
+        results: [
+          {
+            row_id: 4,
+            fields: {
+              Name: "The Navel",
+              Content: {
+                row_id: 4,
+                fields: { BGM: { row_id: 77, fields: {} } },
+              },
+            },
+          },
+        ],
+      });
+    }
+    if (sheet === "Orchestrion" && query === "BGM=77") {
+      return jsonResponse({
+        results: [{ row_id: 91, fields: { Name: "Under the Weight" } }],
+      });
+    }
+    if (url.pathname === "/api/sheet/OrchestrionUiparam/91") {
+      return jsonResponse({
+        row_id: 91,
+        fields: {
+          OrchestrionCategory: { fields: { Name: "Trials" } },
+        },
+      });
+    }
+    return jsonResponse({ results: [] });
+  };
+  const client = new XivApiClient(fetcher as typeof fetch);
+
+  const result = await client.findOrchestrion("The Navel");
+
+  assert.equal(result?.name, "Under the Weight");
+  assert.equal(result?.encounterName, "The Navel");
+  assert.equal(result?.category, "Trials");
+  assert.equal(
+    requestedUrls.find(
+      (url) => url.searchParams.get("sheets") === "ContentFinderCondition",
+    )?.searchParams.get("fields"),
+    "Name,Content.BGM",
+  );
+});
+
 function jsonResponse(value: unknown): Response {
   return new Response(JSON.stringify(value), {
     status: 200,

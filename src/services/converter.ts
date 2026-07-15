@@ -98,9 +98,9 @@ export class MusicConverter {
         now: this.now,
       });
     this.fetch = dependencies.fetch ?? fetch;
-    this.tidalClientId = dependencies.tidalClientId;
-    this.tidalClientSecret = dependencies.tidalClientSecret;
-    this.tidalCountryCode = dependencies.tidalCountryCode ?? "US";
+    this.tidalClientId = trimmedValue(dependencies.tidalClientId);
+    this.tidalClientSecret = trimmedValue(dependencies.tidalClientSecret);
+    this.tidalCountryCode = normalizeCountryCode(dependencies.tidalCountryCode);
   }
 
   async initialize(): Promise<void> {
@@ -447,7 +447,13 @@ export class MusicConverter {
       `https://openapi.tidal.com/v2/${parsedUrl.type === "song" ? "tracks" : `${parsedUrl.type}s`}/${parsedUrl.id}`,
     );
     endpoint.searchParams.set("countryCode", this.tidalCountryCode);
-    endpoint.searchParams.set("include", "artists,albums");
+    const include =
+      parsedUrl.type === "song"
+        ? "artists,albums"
+        : parsedUrl.type === "album"
+          ? "artists"
+          : undefined;
+    if (include) endpoint.searchParams.set("include", include);
     const metadata = await this.tidalJson(endpoint, "Fetching Tidal metadata");
     const data = recordProperty(metadata, "data") ?? metadata;
     const attributes = recordProperty(data, "attributes") ?? data;
@@ -568,17 +574,28 @@ export class MusicConverter {
   private async tidalJson(url: URL, label: string): Promise<unknown> {
     await this.ensureTidalToken();
     try {
-      const response = await this.withTimeout(
-        () =>
-          this.fetch(url, {
-            headers: {
-              Accept: "application/vnd.tidal.v1+json",
-              Authorization: `Bearer ${this.tidalAccessToken}`,
-            },
-          }),
-        label,
-      );
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      let response = await this.tidalRequest(url, label);
+      if (response.status === 401) {
+        this.tidalAccessToken = "";
+        this.tidalTokenExpiresAt = 0;
+        await this.ensureTidalToken();
+        response = await this.tidalRequest(url, label);
+      }
+      if (!response.ok) {
+        if (response.status === 400) {
+          throw new ConversionError(
+            "UPSTREAM_FAILURE",
+            "Tidal rejected the metadata request. Check TIDAL_COUNTRY_CODE and try the link again.",
+          );
+        }
+        if (response.status === 401 || response.status === 403) {
+          throw new ConversionError(
+            "CONFIGURATION",
+            "Tidal denied catalog access. Check that the Tidal app is enabled and its credentials are current.",
+          );
+        }
+        throw new Error(`HTTP ${response.status}`);
+      }
       return await response.json();
     } catch (error) {
       if (error instanceof ConversionError) throw error;
@@ -588,6 +605,19 @@ export class MusicConverter {
         { cause: error },
       );
     }
+  }
+
+  private tidalRequest(url: URL, label: string): Promise<Response> {
+    return this.withTimeout(
+      () =>
+        this.fetch(url, {
+          headers: {
+            Accept: "application/vnd.tidal.v1+json",
+            Authorization: `Bearer ${this.tidalAccessToken}`,
+          },
+        }),
+      label,
+    );
   }
 
   private async externalJson(url: URL, label: string): Promise<unknown> {
@@ -796,6 +826,16 @@ function numberProperty(value: unknown, key: string): number | undefined {
   if (!isRecord(value)) return undefined;
   const property = value[key];
   return typeof property === "number" ? property : undefined;
+}
+
+function trimmedValue(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed || undefined;
+}
+
+function normalizeCountryCode(value: string | undefined): string {
+  const normalized = trimmedValue(value)?.toUpperCase();
+  return normalized && /^[A-Z]{2}$/.test(normalized) ? normalized : "US";
 }
 
 function arrayProperty(value: unknown, key: string): unknown[] {

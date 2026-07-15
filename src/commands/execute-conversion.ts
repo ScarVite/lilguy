@@ -94,5 +94,5 @@ function invalidUrlMessage(
   if (expectedService === "youtubeMusic") {
     return "❌ That doesn't look like a YouTube Music song, album, artist, or playlist URL.";
   }
-  return "❌ Add a supported Spotify or YouTube Music link.";
+  return "❌ Add a supported Spotify, YouTube Music, Tidal, or Apple Music link.";
 }

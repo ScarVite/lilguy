@@ -12,7 +12,7 @@ A Discord slash command bot that converts between Spotify and YouTube Music link
 - Show rich Discord previews with artwork and match confidence
 - Let the requester choose from strong alternative matches
 - Cache recent conversions to improve response time and reduce API usage
-- Look up FFXIV orchestrion tracks, rolls, categories, icons, and market links
+- Look up FFXIV orchestrion tracks by track, roll, duty, raid, trial, or encounter name
 - Works in Discord servers and DMs
 - Self-hosted solution - no dependency on external conversion services
 
@@ -115,6 +115,12 @@ YouTube Music album links use the `/browse/...` format.
 
 ```
 /orchestrion query:Answers
+```
+
+The same command can resolve encounter and duty names, for example:
+
+```
+/orchestrion query:The Navel
 ```
 
 Orchestrion results can use the bot to find a direct Spotify or YouTube match,

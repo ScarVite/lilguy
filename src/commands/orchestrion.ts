@@ -24,7 +24,7 @@ export const data = new SlashCommandBuilder()
   .addStringOption((option) =>
     option
       .setName("query")
-      .setDescription("Track or orchestrion roll name")
+      .setDescription("Track, roll, duty, raid, trial, or encounter name")
       .setRequired(true),
   )
   .setIntegrationTypes(
@@ -49,7 +49,7 @@ export async function execute(
     const result = await xivApi.findOrchestrion(query);
     if (!result) {
       await interaction.editReply({
-        content: `🔍 No orchestrion track found for **${escapeMarkdown(query)}**.`,
+        content: `🔍 No orchestrion track or encounter music found for **${escapeMarkdown(query)}**.`,
         allowedMentions: NO_MENTIONS,
       });
       return;
@@ -65,6 +65,9 @@ export async function execute(
       .addFields(
         ...(result.category
           ? [{ name: "Category", value: result.category, inline: true }]
+          : []),
+        ...(result.encounterName
+          ? [{ name: "Encounter", value: result.encounterName, inline: true }]
           : []),
         ...(result.rollName
           ? [{ name: "Roll", value: result.rollName, inline: true }]
