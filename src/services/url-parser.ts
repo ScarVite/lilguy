@@ -80,7 +80,7 @@ export function parseYouTubeMusicUrl(
   input: string,
 ): ParsedYouTubeMusicUrl | null {
   const url = safeUrl(input);
-  if (!url || url.hostname.toLowerCase() !== "music.youtube.com") return null;
+  if (!url || (url.hostname.toLowerCase() !== "music.youtube.com" && url.hostname.toLowerCase() !== "www.youtube.com")) return null;
 
   const segments = url.pathname.split("/").filter(Boolean);
   const route = segments[0]?.toLowerCase();

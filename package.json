@@ -10,7 +10,7 @@
     "check": "npm run typecheck && npm test",
     "prestart": "npm run build",
     "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts",
+    "dev": "nodemon src/index.ts",
     "deploy-commands": "ts-node src/deploy-commands.ts"
   },
   "dependencies": {
@@ -23,6 +23,7 @@
   "devDependencies": {
     "@types/node": "^22.20.0",
     "@types/spotify-web-api-node": "^5.0.11",
+    "nodemon": "^3.1.14",
     "ts-node": "^10.9.2",
     "typescript": "^5.7.3"
   },
