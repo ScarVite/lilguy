@@ -1,7 +1,5 @@
 import { REST, Routes } from "discord.js";
 import "dotenv/config";
-import { data as spotifyToYtMusic } from "./commands/spotify-to-ytmusic";
-import { data as ytMusicToSpotify } from "./commands/ytmusic-to-spotify";
 import { data as convert } from "./commands/convert";
 import { data as convertMessage } from "./commands/convert-message";
 import { data as orchestrion } from "./commands/orchestrion";
@@ -18,8 +16,6 @@ const commands = [
   convert.toJSON(),
   convertMessage.toJSON(),
   orchestrion.toJSON(),
-  spotifyToYtMusic.toJSON(),
-  ytMusicToSpotify.toJSON(),
 ];
 
 const rest = new REST({ version: "10" }).setToken(token);
