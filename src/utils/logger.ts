@@ -19,6 +19,9 @@ export function initSentry() {
     dsn,
     environment: process.env.NODE_ENV || 'development',
     tracesSampleRate: 0.1,
+    integrations: [
+          Sentry.consoleLoggingIntegration({ levels: ["log", "warn", "error"] }),
+    ],
   });
 
   console.log('Sentry initialized');
