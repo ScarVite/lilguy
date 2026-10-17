@@ -406,16 +406,21 @@ export class MusicConverter {
     parsedUrl: ParsedYouTubeMusicUrl,
   ): Promise<SearchParams> {
     if (parsedUrl.type === "song") {
-      const song = await this.youtubeMusicRequest(
-        () => this.ytMusic.getSong(parsedUrl.id),
-        "Fetching the YouTube Music song",
-      );
-      return {
-        name: song.name,
-        artist: song.artist?.name,
-        durationMs: song.duration ? song.duration * 1_000 : undefined,
-        searchTypeHint: "song",
-      };
+      try {
+        const song = await this.youtubeMusicRequest(
+          () => this.ytMusic.getSong(parsedUrl.id),
+          "Fetching the YouTube Music song",
+        );
+        return {
+          name: song.name,
+          artist: song.artist?.name,
+          durationMs: song.duration ? song.duration * 1_000 : undefined,
+          searchTypeHint: "song",
+        };
+      } catch (error) {
+        if (!isInvalidYouTubeVideoIdError(error)) throw error;
+        return this.extractYouTubeMusicVideoMetadata(parsedUrl.id);
+      }
     }
 
     if (parsedUrl.type === "album") {
@@ -438,6 +443,39 @@ export class MusicConverter {
       artist: artist.name,
       searchTypeHint: "artist",
     };
+  }
+
+  private async extractYouTubeMusicVideoMetadata(
+    videoId: string,
+  ): Promise<SearchParams> {
+    const url = new URL("https://www.youtube.com/oembed");
+    url.searchParams.set("url", `https://www.youtube.com/watch?v=${videoId}`);
+    url.searchParams.set("format", "json");
+
+    try {
+      const response = await this.withTimeout(
+        () => this.fetch(url),
+        "Fetching YouTube video metadata",
+      );
+      if ([400, 401, 403, 404].includes(response.status)) {
+        throw new ConversionError(
+          "UNSUPPORTED_RESOURCE",
+          "YouTube Music couldn't provide details for that video. It may be unavailable or restricted; try another link.",
+        );
+      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+      const title = stringProperty(await response.json(), "title");
+      if (!title) throw new Error("Invalid YouTube video metadata response");
+      return youtubeVideoSearchParams(title);
+    } catch (error) {
+      if (error instanceof ConversionError) throw error;
+      throw new ConversionError(
+        "UPSTREAM_FAILURE",
+        "YouTube is temporarily unavailable. Please try again shortly.",
+        { cause: error },
+      );
+    }
   }
 
   private async extractTidalMetadata(
@@ -799,6 +837,45 @@ function externalMetadataError(service: string): ConversionError {
     "UPSTREAM_FAILURE",
     `${service} could not provide metadata for that link. Please try another link.`,
   );
+}
+
+function isInvalidYouTubeVideoIdError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof Error && current.message === "Invalid videoId") {
+      return true;
+    }
+    current =
+      current instanceof Error
+        ? current.cause
+        : isRecord(current)
+          ? current.cause
+          : undefined;
+  }
+
+  return false;
+}
+
+function youtubeVideoSearchParams(title: string): SearchParams {
+  const quotedTitle = /^(.+?)\s+-\s+["“](.+?)["”](?:\s+\((?:feat(?:uring)?|ft)\b.*\))?$/i.exec(
+    title,
+  );
+  if (quotedTitle) {
+    return {
+      name: quotedTitle[2].trim(),
+      artist: quotedTitle[1].trim(),
+      searchTypeHint: "song",
+    };
+  }
+
+  return {
+    name: title,
+    searchQuery: title,
+    searchTypeHint: "song",
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
