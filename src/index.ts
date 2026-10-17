@@ -7,8 +7,6 @@ import {
 } from "discord.js";
 import "dotenv/config";
 import { initSentry, logger } from "./utils/logger";
-import * as spotifyToYtMusic from "./commands/spotify-to-ytmusic";
-import * as ytMusicToSpotify from "./commands/ytmusic-to-spotify";
 import * as convert from "./commands/convert";
 import * as convertMessage from "./commands/convert-message";
 import * as orchestrion from "./commands/orchestrion";
@@ -30,8 +28,6 @@ for (const command of [
   convert,
   convertMessage,
   orchestrion,
-  spotifyToYtMusic,
-  ytMusicToSpotify,
 ]) {
   commands.set(command.data.name, command);
 }
